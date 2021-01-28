@@ -64,6 +64,7 @@ public class EntryProcess
 	
 	public void onArtifactActivated(ServerPlayerEntity player)
 	{
+		long totalTime = System.currentTimeMillis();
 		try
 		{
 			if(player.world.getDimension().getType() != DimensionType.THE_NETHER)
@@ -79,7 +80,7 @@ public class EntryProcess
 				{
 					ServerWorld oldWorld = (ServerWorld) player.world;
 					
-					positioning = new EntryPositioning.Default(player.getPosition(), oldWorld);
+					positioning = new DefaultPositioning(player.getPosition(), oldWorld);
 					
 					if(!canModifyEntryBlocks(player.world, player))
 					{
@@ -109,6 +110,7 @@ public class EntryProcess
 						if(newWorld == null)
 							return;
 						
+						long time = System.currentTimeMillis();
 						if(this.prepareDestination(player, oldWorld))
 						{
 							moveBlocks(oldWorld, newWorld);
@@ -118,6 +120,8 @@ public class EntryProcess
 								SkaianetHandler.get(player.world).onEntry(identifier);
 							} else player.sendMessage(new StringTextComponent("Entry failed. Unable to teleport you!"));
 						}
+						time = System.currentTimeMillis() - time;
+						LOGGER.debug("Actual entry time: {}", time);
 					}
 				}
 			}
@@ -126,13 +130,15 @@ public class EntryProcess
 			LOGGER.error("Exception when {} tried to enter their land.", player.getName().getFormattedText(), e);
 			player.sendMessage(new StringTextComponent("[Minestuck] Something went wrong during entry. "+ (player.getServer().isDedicatedServer()?"Check the console for the error message.":"Notify the server owner about this.")).setStyle(new Style().setColor(TextFormatting.RED)));
 		}
+		totalTime = System.currentTimeMillis() - totalTime;
+		LOGGER.debug("Total entry time: {}", totalTime);
 	}
 	
 	private boolean foundComputer = false;
 	
 	private boolean prepareDestination(ServerPlayerEntity player, ServerWorld world)
 	{
-		
+		long time = System.currentTimeMillis();
 		blockMoves = new HashSet<>();
 		
 		LOGGER.info("Starting entry for player {}", player.getName().getFormattedText());
@@ -142,7 +148,7 @@ public class EntryProcess
 		LOGGER.debug("Loading block movements...");
 		
 		BlockPos offset = positioning.getTeleportOffset();
-		if(!positioning.forEachBlockTry(pos -> makeBlockMove(pos, world, player, offset)))
+		if(!positioning.forEachBlockTry((pos, edge) -> makeBlockMove(pos, edge, world, player, offset)))
 			return false;
 		
 		if(!foundComputer && MinestuckConfig.SERVER.needComputer.get())
@@ -151,10 +157,13 @@ public class EntryProcess
 			return false;
 		}
 		
+		time = System.currentTimeMillis() - time;
+		LOGGER.debug("Block move and computer-checking preparation time: {}", time);
+		
 		return true;
 	}
 	
-	private boolean makeBlockMove(BlockPos pos, ServerWorld world, ServerPlayerEntity player, BlockPos offset)
+	private boolean makeBlockMove(BlockPos pos, boolean isEdge, ServerWorld world, ServerPlayerEntity player, BlockPos offset)
 	{
 		pos = pos.toImmutable();
 		IChunk c = world.getChunk(pos);
@@ -183,13 +192,13 @@ public class EntryProcess
 			foundComputer = true;    //You have a computer in range. That means you're taking your computer with you when you Enter. Smart move.
 		}
 		
-		//Shouldn't this line check if the block is an edge block?
-		blockMoves.add(new BlockMove(c, pos, pos1, block, false));
+		blockMoves.add(new BlockMove(c, pos, pos1, block, isEdge));
 		return true;
 	}
 	
 	private void moveBlocks(ServerWorld originWorld, ServerWorld destinationWorld)
 	{
+		long time = System.currentTimeMillis();
 		//This is split into two sections because moves that require block updates should happen after the ones that don't.
 		//This helps to ensure that "anchored" blocks like torches still have the blocks they are anchored to when they update.
 		//Some blocks like this (confirmed for torches, rails, and glowystone) will break themselves if they update without their anchor.
@@ -207,15 +216,24 @@ public class EntryProcess
 			move.copy(destinationWorld, destinationWorld.getChunk(move.dest));
 		}
 		blockMoves2.clear();
+		time = System.currentTimeMillis() - time;
+		LOGGER.debug("Block moving time: {}", time);
 	}
 	
 	private void finalizeDestination(ServerPlayerEntity player, ServerWorld originWorld, ServerWorld landWorld)
 	{
+		long time = System.currentTimeMillis();
 		LOGGER.debug("Teleporting entities...");
 		List<Entity> entitiesToKeep = teleportEntities(player, originWorld, landWorld);
+		time = System.currentTimeMillis() - time;
+		LOGGER.debug("Entity teleporting time: {}", time);
+		time = System.currentTimeMillis();
 		
 		LOGGER.debug("Removing original blocks");
 		removeOriginalBlocks(originWorld);
+		time = System.currentTimeMillis() - time;
+		LOGGER.debug("Block removing time: {}", time);
+		time = System.currentTimeMillis();
 		
 		BlockPos offset = positioning.getTeleportOffset();
 		player.setPositionAndUpdate(player.getPosX() + offset.getX(), player.getPosY() + offset.getY(), player.getPosZ() + offset.getZ());
@@ -236,6 +254,8 @@ public class EntryProcess
 		MSDimensions.getLandInfo(landWorld).setSpawn(MathHelper.floor(player.getPosY()));
 		
 		LOGGER.info("Entry finished");
+		time = System.currentTimeMillis() - time;
+		LOGGER.debug("Remaining tasks time: {}", time);
 	}
 	
 	private List<Entity> teleportEntities(ServerPlayerEntity player, ServerWorld originWorld, ServerWorld landWorld)
@@ -354,7 +374,7 @@ public class EntryProcess
 	
 	private boolean canModifyEntryBlocks(World world, PlayerEntity player)
 	{
-		return positioning.forEachXZTry(pos -> world.isBlockModifiable(player, pos));
+		return positioning.forEachXZTry((pos, edge) -> world.isBlockModifiable(player, pos));
 	}
 	
 	private static void copyBlockDirect(IWorld world, IChunk cSrc, IChunk cDst, int xSrc, int ySrc, int zSrc, int xDst, int yDst, int zDst)
