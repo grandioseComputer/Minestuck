@@ -392,8 +392,10 @@ public class EntryProcess
 			if(i == 4)
 			{
 				world.setBlockState(pos, MSBlocks.GATE.getDefaultState().cycle(GateBlock.MAIN), 0);
-				GateTileEntity tileEntity = (GateTileEntity) world.getTileEntity(pos);
-				tileEntity.gateType = gateType;
+				TileEntity tileEntity = world.getTileEntity(pos);
+				if(tileEntity instanceof GateTileEntity)
+					((GateTileEntity) tileEntity).gateType = gateType;
+				else LOGGER.error("Expected a gate tile entity when placing a gate, but found {}", tileEntity);
 			}
 			else world.setBlockState(pos.add((i % 3) - 1, 0, i/3 - 1), MSBlocks.GATE.getDefaultState(), 0);
 	}
