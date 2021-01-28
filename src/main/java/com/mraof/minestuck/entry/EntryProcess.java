@@ -60,7 +60,6 @@ public class EntryProcess
 	
 	private EntryPositioning positioning;
 	private boolean creative;
-	private HashSet<BlockMove> blockMoves;
 	
 	public void onArtifactActivated(ServerPlayerEntity player)
 	{
@@ -139,7 +138,6 @@ public class EntryProcess
 	private boolean prepareDestination(ServerPlayerEntity player, ServerWorld world)
 	{
 		long time = System.currentTimeMillis();
-		blockMoves = new HashSet<>();
 		
 		LOGGER.info("Starting entry for player {}", player.getName().getFormattedText());
 		
@@ -147,8 +145,7 @@ public class EntryProcess
 		
 		LOGGER.debug("Loading block movements...");
 		
-		BlockPos offset = positioning.getTeleportOffset();
-		if(!positioning.forEachBlockTry((pos, edge) -> makeBlockMove(pos, edge, world, player, offset)))
+		if(!positioning.forEachBlockTry((pos, edge) -> makeBlockMove(pos, world, player)))
 			return false;
 		
 		if(!foundComputer && MinestuckConfig.SERVER.needComputer.get())
@@ -163,21 +160,15 @@ public class EntryProcess
 		return true;
 	}
 	
-	private boolean makeBlockMove(BlockPos pos, boolean isEdge, ServerWorld world, ServerPlayerEntity player, BlockPos offset)
+	private boolean makeBlockMove(BlockPos pos, ServerWorld world, ServerPlayerEntity player)
 	{
 		pos = pos.toImmutable();
-		IChunk c = world.getChunk(pos);
-		BlockPos pos1 = pos.add(offset);
 		BlockState block = world.getBlockState(pos);
 		TileEntity te = world.getTileEntity(pos);
 		
 		Block gotBlock = block.getBlock();
 		
-		if(gotBlock == Blocks.BEDROCK || gotBlock == Blocks.NETHER_PORTAL)
-		{
-			blockMoves.add(new BlockMove(c, pos, pos1, Blocks.AIR.getDefaultState(), true));
-			return true;
-		} else if(!creative && (gotBlock == Blocks.COMMAND_BLOCK || gotBlock == Blocks.CHAIN_COMMAND_BLOCK || gotBlock == Blocks.REPEATING_COMMAND_BLOCK))
+		if(!creative && (gotBlock == Blocks.COMMAND_BLOCK || gotBlock == Blocks.CHAIN_COMMAND_BLOCK || gotBlock == Blocks.REPEATING_COMMAND_BLOCK))
 		{
 			player.sendStatusMessage(new StringTextComponent("You are not allowed to move command blocks."), false);
 			return false;
@@ -191,31 +182,22 @@ public class EntryProcess
 			
 			foundComputer = true;    //You have a computer in range. That means you're taking your computer with you when you Enter. Smart move.
 		}
-		
-		blockMoves.add(new BlockMove(c, pos, pos1, block, isEdge));
 		return true;
 	}
 	
 	private void moveBlocks(ServerWorld originWorld, ServerWorld destinationWorld)
 	{
 		long time = System.currentTimeMillis();
-		//This is split into two sections because moves that require block updates should happen after the ones that don't.
-		//This helps to ensure that "anchored" blocks like torches still have the blocks they are anchored to when they update.
-		//Some blocks like this (confirmed for torches, rails, and glowystone) will break themselves if they update without their anchor.
+		
 		LOGGER.debug("Moving blocks...");
-		HashSet<BlockMove> blockMoves2 = new HashSet<>();
-		for(BlockMove move : blockMoves)
-		{
-			if(move.update)
-				move.copy(destinationWorld, destinationWorld.getChunk(move.dest));
-			else
-				blockMoves2.add(move);
-		}
-		for(BlockMove move : blockMoves2)
-		{
-			move.copy(destinationWorld, destinationWorld.getChunk(move.dest));
-		}
-		blockMoves2.clear();
+		
+		BlockPos offset = positioning.getTeleportOffset();
+		positioning.forEachBlock((pos, edge) -> {
+			BlockState state = originWorld.getBlockState(pos);
+			if(state.getBlock() != Blocks.BEDROCK && state.getBlock() != Blocks.NETHER_PORTAL)
+				copyBlock(originWorld, pos, destinationWorld, pos.add(offset), state, edge);
+		});
+		
 		time = System.currentTimeMillis() - time;
 		LOGGER.debug("Block moving time: {}", time);
 	}
@@ -296,19 +278,12 @@ public class EntryProcess
 	
 	private void removeOriginalBlocks(ServerWorld originWorld)
 	{
-		for(BlockMove move : blockMoves)
-		{
-			removeTileEntity(originWorld, move.source, creative);	//Tile entities need special treatment
+		positioning.forEachBlock((pos, edge) -> {
+			removeTileEntity(originWorld, pos, creative);	//Tile entities need special treatment
 			
-			if(MinestuckConfig.SERVER.entryCrater.get() && originWorld.getBlockState(move.source).getBlock() != Blocks.BEDROCK)
-			{
-				if(move.update)
-					originWorld.setBlockState(move.source, Blocks.AIR.getDefaultState(), Constants.BlockFlags.DEFAULT);
-				else
-					originWorld.setBlockState(move.source, Blocks.AIR.getDefaultState(), Constants.BlockFlags.BLOCK_UPDATE);
-			}
-		}
-		blockMoves.clear();
+			if(MinestuckConfig.SERVER.entryCrater.get() && originWorld.getBlockState(pos).getBlock() != Blocks.BEDROCK)
+				originWorld.setBlockState(pos, Blocks.AIR.getDefaultState(), edge ? Constants.BlockFlags.DEFAULT : Constants.BlockFlags.BLOCK_UPDATE);
+		});
 	}
 	
 	/**
@@ -423,61 +398,42 @@ public class EntryProcess
 			else world.setBlockState(pos.add((i % 3) - 1, 0, i/3 - 1), MSBlocks.GATE.getDefaultState(), 0);
 	}
 	
-	private static class BlockMove
+	static void copyBlock(ServerWorld worldFrom, BlockPos posFrom, ServerWorld worldTo, BlockPos posTo, BlockState state, boolean shouldUpdate)
 	{
-		private final IChunk chunkFrom;
-		private final BlockPos source;
-		private final BlockPos dest;
-		private final BlockState block;
-		private final boolean update;
+		if(worldTo.getBlockState(posTo).getBlock() == Blocks.BEDROCK)
+			return;
 		
-		BlockMove(IChunk c, BlockPos src, BlockPos dst, BlockState b, boolean u)
+		IChunk chunkTo = worldTo.getChunk(posTo), chunkFrom = worldFrom.getChunk(posFrom);
+		if(shouldUpdate)
 		{
-			chunkFrom = c;
-			source = src;
-			dest = dst;
-			block = b;
-			update = u;
+			chunkTo.setBlockState(posTo, state, true);
+		} else if(state == Blocks.AIR.getDefaultState())
+		{
+			worldTo.setBlockState(posTo, state, 0);
+		} else
+		{
+			copyBlockDirect(worldTo, chunkFrom, chunkTo, posFrom.getX(), posFrom.getY(), posFrom.getZ(), posTo.getX(), posTo.getY(), posTo.getZ());
 		}
 		
-		void copy(ServerWorld world, IChunk chunkTo)
+		TileEntity tileEntity = chunkFrom.getTileEntity(posFrom);
+		TileEntity newTE = null;
+		if(tileEntity != null)
 		{
-			if(chunkTo.getBlockState(dest).getBlock() == Blocks.BEDROCK)
-			{
-				return;
-			}
+			CompoundNBT nbt = new CompoundNBT();
+			tileEntity.write(nbt);
+			nbt.putInt("x", posTo.getX());
+			nbt.putInt("y", posTo.getY());
+			nbt.putInt("z", posTo.getZ());
+			newTE = TileEntity.create(nbt);
+			if(newTE != null)
+				worldTo.setTileEntity(posTo, newTE);
+			else LOGGER.warn("Unable to create a new tile entity {} when teleporting blocks to the medium!", tileEntity.getType().getRegistryName());
 			
-			if(update)
-			{
-				chunkTo.setBlockState(dest, block, true);
-			} else if(block == Blocks.AIR.getDefaultState())
-			{
-				world.setBlockState(dest, block, 0);
-			} else
-			{
-				copyBlockDirect(world, chunkFrom, chunkTo, source.getX(), source.getY(), source.getZ(), dest.getX(), dest.getY(), dest.getZ());
-			}
-			
-			TileEntity tileEntity = chunkFrom.getTileEntity(source);
-			TileEntity newTE = null;
-			if(tileEntity != null)
-			{
-				CompoundNBT nbt = new CompoundNBT();
-				tileEntity.write(nbt);
-				nbt.putInt("x", dest.getX());
-				nbt.putInt("y", dest.getY());
-				nbt.putInt("z", dest.getZ());
-				newTE = TileEntity.create(nbt);
-				if(newTE != null)
-					world.setTileEntity(dest, newTE);
-				else LOGGER.warn("Unable to create a new tile entity {} when teleporting blocks to the medium!", tileEntity.getType().getRegistryName());
-				
-			}
-			
-			for(EntryBlockProcessing processing : blockProcessors)
-			{
-				processing.copyOver((ServerWorld) chunkFrom.getWorldForge(), source, world, dest, block, tileEntity, newTE);
-			}
+		}
+		
+		for(EntryBlockProcessing processing : blockProcessors)
+		{
+			processing.copyOver((ServerWorld) chunkFrom.getWorldForge(), posFrom, worldTo, posTo, state, tileEntity, newTE);
 		}
 	}
 }
